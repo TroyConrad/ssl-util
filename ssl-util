@@ -1,0 +1,491 @@
+#!/usr/bin/perl
+
+=pod =======================================================
+
+=head1 SYNOPSIS
+
+MODULE NAME: ssl-util
+
+DESCRIPTION: Utility for generating CSRs, purchasing certificates and installing in AWS.
+
+NOTES: 
+
+AUTHOR: Troy Conrad, Mirum Inc. <troy.conrad@mirumagenc.com>
+
+=VERSIONS: See end for version history
+
+=cut =======================================================
+
+package Mirum::SSL::Util;
+
+our $SCRIPT_NAME = 'ssl-util';
+
+our $VERSION = '0.3.1';
+
+use File::Path qw(make_path remove_tree);
+use feature qw(switch unicode_strings);
+use Cwd;
+use Getopt::Std;
+use Term::ANSIColor qw(:constants);
+use YAML::Tiny;
+
+binmode(STDOUT, ":utf8"); # suppresses UTF-related warnings
+
+######### CONFIGURATION #########
+
+our($CONFIG_DIR,$SETTINGS,$OPENSSL_CMD);
+
+$CONFIG_DIR = "/etc/$SCRIPT_NAME";
+
+$SETTINGS = getSettings("$CONFIG_DIR/settings.yml");
+
+######### MAIN PROGRAM #########
+
+our($opt_h,$opt_n,$opt_r,$opt_V,$opt_t,$opt_v);
+
+getopts('hnrVt:v:');
+
+our $VERBOSITY = $opt_v ||= 1;
+
+if ($opt_V) { print "$SCRIPT_NAME version $VERSION\n"; exit; }
+
+logger(1,"$SCRIPT_NAME version $VERSION started.\n");
+
+if ($opt_h) { showHelp() }
+
+our $DRY_RUN = $opt_n;
+
+logger(1,"Dry run mode enabled, no changes will be made.\n") if $DRY_RUN;
+
+my $tasks = lc $opt_t;
+
+if (@ARGV)
+{
+  init();
+  while (@ARGV)
+  {
+    my $domainArg = lc(shift(@ARGV));
+    my ($domain) = getDomainValues($domainArg);
+    $domain =~ m/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/ || fail("'$domain' is not a valid fully qualified domain name.");
+    processDomain($domainArg);
+  }
+}
+else{
+  fail("No domains were specified!");
+}
+
+########## MAIN PROGRAM ##########
+
+sub init
+{
+  $OPENSSL_CMD = '/usr/bin/openssl';
+  my $openssl_alt = '/usr/local/opt/openssl/bin/openssl';
+  $OPENSSL_CMD = $openssl_alt if -f $openssl_alt; # use newer version if available
+
+  # my $aws_access_key = $SETTINGS->{'aws_access_key'};
+  # my $aws_secret_key = $SETTINGS->{'aws_secret_key'};
+  # 
+  # $AWS_ROUTE53 = Net::Amazon::Route53->new( id => $aws_access_key, key => $aws_secret_key)
+  #   or die "Failed to create WebService::Amazon::Route53 instance!";
+
+}
+
+###
+
+sub processDomain
+{
+  my $domainArg = shift;
+  logger(1,"Processing domain $domainArg...");
+
+  createSSLCSR($domainArg)    if $tasks =~ /create/   or !$tasks;
+  #buySSLCert($domainArg)      if $tasks =~ /buy/ ;  # or !$tasks;
+  prepareSSLCert($domainArg)  if $tasks =~ /prepare/  or !$tasks;
+  installSSLCert($domainArg)  if $tasks =~ /install/  or !$tasks;
+  exportSSLCert($domainArg)   if $tasks =~ /export/   or !$tasks;
+
+  logger(1,"$domainArg setup complete.");
+}
+
+########## MAIN FUNCTIONS ##########
+
+sub showHelp
+{
+  print <<EOS;
+$SCRIPT_NAME version $VERSION
+
+SYNOPSIS
+
+SCRIPT_NAME [-hnV] [-t tasks] [-v verbosity] domain1 [domain2]...
+
+DESCRIPTION
+
+<Add text>
+
+OPTIONS
+
+-h  Shows this Help screen and exits.
+
+-n  Dry Run mode. Only show what would be done.
+
+-V  Prints version info and exits.
+
+-t  <one or more space-delimited tasks to perform> Defaults to ALL.
+
+    Case-insensitive choices are:
+
+      request - Create a certificate request.
+      prepare - Prepare recieved files for import in Amazon AWS.
+      install - Install prepared files in Amazon AWS.
+      export  - Combine all files into a PFX/P12 file for IIS, etc.
+
+-r  Replace existing SSL certificate in AWS.
+
+-v  <Verbosity level> Defaults to "1". 
+
+    Increasing the value provides more detailed logging.
+
+<domain1> [<domain2 ...] Domain(s) to process. Specify *.<domainname> for Wildcard certificates. For example: *.example.com
+EOS
+
+  exit;
+}
+
+###
+
+sub createSSLCSR
+{
+  my ($domainArg,$subject) = @_;
+
+  my ($domain,$fileName,$wildcard_cert) = getDomainValues($domainArg);
+
+  logger(1,"Checking for existing SSL CSR and key...");
+  
+  my $fileDir = $SETTINGS->{'ssl_certificate_dir'} . "/$domain";
+
+  my $keyout = "$fileDir/$fileName-privatekey.key";
+  my $out = "$fileDir/$fileName.csr";
+
+  if (-f $keyout && -f $out)
+  {
+    logger(2,"Existing SSL CSR and key found; skipping creation.");
+    my $csr = `/bin/cat $out`;
+    logger(3,"CSR:\n$csr");
+
+    return;
+  }
+
+  logger(1,"Creating SSL CSR and key...");
+
+  make_path($fileDir);
+  
+  logger(2,"Running OpenSSL command...");
+
+  my $organization = $SETTINGS->{'organization' };
+  my $department   = $SETTINGS->{'department'   };
+  my $city         = $SETTINGS->{'city'         };
+  my $state        = $SETTINGS->{'state'        };
+  my $country      = $SETTINGS->{'country_csr'  };
+  my $emailAddress = $SETTINGS->{'email'        };
+
+  unless ($wildcard_cert)
+  {
+    # normalize to www.domain unless it's a wildcard cert request
+    $domainArg = "www.$domainArg" unless $domainArg =~ /www\./;
+  }
+
+  my $subj = "/C=$country/ST=$state/L=$city/O=$organization/OU=$department/emailAddress=$emailAddress/CN=$domainArg";
+
+  my $cmd = "$OPENSSL_CMD req -new -newkey rsa:2048 -nodes -subj '$subj' -days 3650 -keyout $keyout -out $out 2>&1";
+  
+  my $result = runCmd($cmd);
+
+  unless ( $result and $result !~ /error/i and -f $out ) { fail("Error creating SSL CSR and key!"); }
+
+  #$cmd = "/bin/cat $out | sed '/-----BEGIN CERTIFICATE REQUEST-----/d' | sed '/-----END CERTIFICATE REQUEST-----/d' | tr -d '\n'";
+  $cmd = "cat $out";
+  
+  my $csr = runCmd($cmd);
+
+  logger(2,"CSR:\n$csr");
+}
+
+# sub buySSLCert
+# {
+#   my $domainArg = shift;
+# 
+#   my ($domain,$fileName) = getDomainValues($domainArg);
+# 
+#   logger(1,"Buying SSL certificate...");
+# }
+
+sub prepareSSLCert
+{
+  my $domainArg = shift;
+
+  my ($domain,$fileName,$wildcard_cert) = getDomainValues($domainArg);
+
+  logger(1,"Preparing SSL certificate files...");
+  # Normalize, bundle and upload new SSL cert to AWS
+  
+  my $fileDir = $SETTINGS->{'ssl_certificate_dir'} . "/$domain";
+
+  logger(2,"Checking for certificate files in $fileDir...");
+
+  my ($certFile) = glob "$fileDir/*.crt";
+  my ($bundleFile) = glob "$fileDir/*.ca-bundle";
+ 
+  unless (-f $certFile && -f $bundleFile)
+  {
+    logger(2,"Checking for downloaded certificate zip file in $fileDir...");
+
+    my ($zipFile) = glob "$fileDir/*.zip";
+    
+    unless (-f $zipFile)
+    {
+      loggerFail(RED."Purchase the $fileName SSL certificate and place the zip file in:\n$fileDir/".RESET);
+      if ($^O =~ /darwin/i)
+      {
+        `open '$fileDir'` ;
+      }
+      exit;
+    }
+  
+    logger(4,'Creating temp working dir...');
+    my $tempDir = createTempDir("$SCRIPT_NAME/$domain") || die "Could not create temp dir! $!";
+  
+    runCmd("unzip -o -j -d '$tempDir' '$zipFile'");
+  
+    runCmd("mv $tempDir/*.ca-bundle $fileDir/$fileName.ca-bundle");
+    runCmd("mv $tempDir/*.crt       $fileDir/$fileName.crt")      ;
+  
+    logger(4,'Cleaning up...');
+    remove_tree($tempDir);
+  }
+
+  logger(2,"Normalizing private key file...");
+
+  my $cmd = "$OPENSSL_CMD rsa -in $fileDir/${fileName}-privatekey.key -out '$fileDir/${fileName}-rsa-privatekey.key'";
+
+  my $result = runCmd($cmd);
+  #$result || die "Error normalizing privatekey file!\n";
+  logger(2,"OpenSSL:\n$result\n");
+}
+
+###
+
+sub installSSLCert
+{
+  my $domainArg = shift;
+
+  my ($domain,$fileName,$wildcard_cert) = getDomainValues($domainArg);
+
+  logger(1,"Installing SSL certificate...");
+  # Normalize, bundle and upload new SSL cert to AWS
+
+  my $fileDir = $SETTINGS->{'ssl_certificate_dir'} . "/$domain";
+
+  logger(2,"Checking for existing certificate in AWS...");
+
+  my $result = runCmd("aws iam get-server-certificate --server-certificate-name '$fileName' 2>&1");
+
+  #die $result;
+
+  if ($result =~ /NoSuchEntity/)
+  {
+    my $certName = $fileName;
+    ### Upload cert to AWS
+    $_ = uploadSSLCert($certName,$fileName,$fileDir);
+    fail("An error occured uploading the SSL certificate files.") if /error/i
+
+  }
+  else
+  {
+      if ($opt_r)
+      {
+        logger(2,"A certificate named $fileName already exists in AWS, using alternate name...");
+        #my $result = runCmd("aws iam delete-server-certificate --server-certificate-name $fileName  2>&1");
+
+        my @time = localtime(time);
+        my $certName = $fileName . '_' . ($time[5] += 1900);
+
+        ### Upload cert to AWS
+        $_ = uploadSSLCert($certName,$fileName,$fileDir);
+        fail("An error occured uploading the SSL certificate files.") if /error/i
+      }
+      else
+      {
+        logger(2,"Existing certificate found in AWS, skipping upload.");
+      }
+  }
+ 
+  logger(3,"AWS Certificate:\n$result\n");
+
+}
+
+###
+
+sub exportSSLCert
+{
+  my $domainArg = shift;
+
+  my ($domain,$fileName,$wildcard_cert) = getDomainValues($domainArg);
+
+  logger(1,"Exporting SSL certificate...");
+
+  my $fileDir = $SETTINGS->{'ssl_certificate_dir'} . "/$domain";
+
+  logger(2,"Checking for existing PFX file...");
+
+  if (-f "$fileDir/$fileName.pfx")
+  {
+    logger(2,"'$fileName.pfx' already exists, skipping creation.");
+  }
+  else
+  {
+    logger(2,"Creating combined PFX file...");
+ 
+    my $base = "$fileDir/$fileName";
+    my $cmd = "$OPENSSL_CMD pkcs12 -export -inkey '$base-rsa-privatekey.key' -in '$base.crt' -certfile '$base.ca-bundle' -out '$base.pfx'";
+
+    my $result = runCmd($cmd);
+    $result =~ /error/i && loggerFail(RED.$result.RESET);
+  }
+}
+
+###
+
+sub uploadSSLCert
+{
+  my ($certName,$fileName,$fileDir) = @_;
+
+  logger(2,"Uploading $certName certificate to AWS...");
+ 
+   my $cmd = "aws iam upload-server-certificate --server-certificate-name '$certName' "
+  . "--certificate-body 'file://$fileDir/$fileName.crt' "
+  . "--private-key 'file://$fileDir/$fileName-rsa-privatekey.key' "
+  . "--certificate-chain 'file://$fileDir/$fileName.ca-bundle' 2>&1";
+
+  my $result = runCmd($cmd);
+
+  $result =~ /error/i && loggerFail(RED.$result.RESET);
+
+  $result || loggerFail(RED."An error occured uploading the SSL certificate files.".RESET);
+
+  return $result;
+}
+
+
+###
+
+sub getDomainValues
+{
+  my $domain = my $fileName = shift;
+  my $wildcard = 0;
+  # if first two chars are '*.', wildcard SSL cert
+  
+  if (substr($domain, 0, 2) eq '*.')
+  {
+    $wildcard = 1;
+    $domain = substr($domain, 2);
+    #$fileName = "STAR_$domain";
+    $fileName = "STAR_$domain";
+  }
+  else
+  {
+    # normalize to www.domain
+    $fileName = "www_$domain" unless $fileName =~ /^www_/;
+  }
+
+  $fileName =~ tr/./_/;
+
+  return ($domain,$fileName,$wildcard);
+}
+
+###
+
+sub runCmd
+{
+  my $cmd = shift || die 'No command was specified.';
+  if ($DRY_RUN)
+  {
+    logger(2,"Dry run mode enabled, skipping command:\n$cmd");
+    return 1;
+  }
+  else
+  {
+    logger(3,"Running command:\n$cmd");
+    return `$cmd`;
+  }
+}
+
+###
+
+sub getSettings
+{
+  my $configFile = shift;
+
+  -f $configFile || fail("Can't load the $SCRIPT_NAME settings file at '$configFile'.");
+
+  # Open the config
+  my $yaml = YAML::Tiny->read($configFile);
+
+  return $yaml->[0];
+}
+
+######### COMMON FUNCTIONS #########
+
+sub GREEN_CHAR  { "\x{2705}" } # Unicode Green Checkbox
+sub RED_CHAR  { "\x{2757}" } # Unicode Red Exclamation
+
+###
+
+sub fail { die RED . shift . RESET . "\nExiting.\n"; }
+
+###
+
+sub logger
+{
+  my($level,$msg,$noNewLine) = @_;
+  ($msg,$noNewLine) = @_ unless ( int($level) > 0 and int($level) > 0);
+  if ($VERBOSITY >= $level)
+  {
+    #print '#' x ($level-1) , "\t" x ($level-1) , $msg;
+    $msg = WHITE        . $msg if $level == 1;
+    $msg = CYAN         . $msg if $level == 2;
+    $msg = BLUE         . $msg if $level == 3;
+    $msg = BRIGHT_BLACK . $msg if $level == 4;
+    print BRIGHT_BLACK . '#' x ($level-1) . RESET . "  " x ($level-1) . $msg . RESET;
+    print "\n" unless $noNewLine;
+  }
+}
+
+###
+
+sub loggerPass
+{
+  ($type,$server,$result) = @_;
+  printf("%s  %-15s %-45s %s\n", GREEN_CHAR, $type, $server, GREEN.$result.RESET);
+}
+
+###
+
+sub loggerFail
+{
+  ($type,$server,$result) = @_;
+  $result =~ s/HTTP\/1.1 //;
+  printf("%s  %-15s %-45s %s\n",   RED_CHAR, $type, $server,   RED.$result.RESET);
+}
+
+###
+
+sub createTempDir
+{
+  my $dir = shift;
+  $dir =~ tr/a-zA-Z0-9/_/cs;
+  $dir = "/tmp/$dir" . time;
+  remove_tree($dir);
+  make_path($dir) || return;
+  return $dir;
+}
+
+__END__
