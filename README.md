@@ -7,6 +7,7 @@ $ cd && rm -rf ssl-util && git clone https://github.com/TroyDConrad/ssl-util.git
 
 For a fresh install, edit the /etc/ssl-util/settings.yml file and add the following:
 
+`
 # SSL certificate base directory
 ssl_certificate_dir: <ssl certificate directory, usually '/etc/ssl_certificates'>
 
@@ -21,3 +22,4 @@ city: <city name>
 state: <state name>
 country_csr: <country name, e.g. 'US'>
 email: <email address>
+`
