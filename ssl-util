@@ -20,7 +20,7 @@ package Mirum::SSL::Util;
 
 our $SCRIPT_NAME = 'ssl-util';
 
-our $VERSION = '0.3.1';
+our $VERSION = '0.3.2';
 
 use File::Path qw(make_path remove_tree);
 use feature qw(switch unicode_strings);
@@ -184,7 +184,7 @@ sub createSSLCSR
   my $department   = $SETTINGS->{'department'   };
   my $city         = $SETTINGS->{'city'         };
   my $state        = $SETTINGS->{'state'        };
-  my $country      = $SETTINGS->{'country_csr'  };
+  my $country      = $SETTINGS->{'country'      };
   my $emailAddress = $SETTINGS->{'email'        };
 
   unless ($wildcard_cert)
