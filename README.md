@@ -11,11 +11,7 @@ For a fresh install, edit the /etc/ssl-util/settings.yml file and add the follow
 # SSL certificate base directory
 ssl_certificate_dir: <ssl certificate directory, usually '/etc/ssl_certificates'>
 
-# AWS access credentials (used to upload cert to AWS IAM)
-aws_access_key: <AWS access key>
-aws_secret_key: <AWS secret key>
-
-# CSR (Certificate Signing Request) settings
+# CSR (Certificate Signing Request) info
 organization: <organization name>
 department: <department name>
 city: <city name>
