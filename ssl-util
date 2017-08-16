@@ -20,7 +20,7 @@ package Mirum::SSL::Util;
 
 our $SCRIPT_NAME = 'ssl-util';
 
-our $VERSION = '0.3.2';
+our $VERSION = '0.3.3';
 
 use File::Path qw(make_path remove_tree);
 use feature qw(switch unicode_strings);
@@ -180,12 +180,12 @@ sub createSSLCSR
   
   logger(2,"Running OpenSSL command...");
 
-  my $organization = $SETTINGS->{'organization' };
+  my $organization = $SETTINGS->{'organization' } || die ("SETTINGS: 'organization' must not be empty.");
   my $department   = $SETTINGS->{'department'   };
-  my $city         = $SETTINGS->{'city'         };
-  my $state        = $SETTINGS->{'state'        };
-  my $country      = $SETTINGS->{'country'      };
-  my $emailAddress = $SETTINGS->{'email'        };
+  my $city         = $SETTINGS->{'city'         } || die ("SETTINGS: 'city' must not be empty.");
+  my $state        = $SETTINGS->{'state'        } || die ("SETTINGS: 'state' must not be empty.");
+  my $country      = $SETTINGS->{'country'      } || die ("SETTINGS: 'country' must not be empty.");
+  my $emailAddress = $SETTINGS->{'email'        } || die ("SETTINGS: 'email' must not be empty.");
 
   unless ($wildcard_cert)
   {
