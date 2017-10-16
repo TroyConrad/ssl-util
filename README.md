@@ -3,7 +3,7 @@ Utility for generating CSRs, purchasing certificates and installing in Amazon AW
 
 To install:
 
-$ cd && rm -rf ssl-util && git clone https://github.com/TroyDConrad/ssl-util.git && cd ssl-util && sudo ./install.sh
+$ cd && rm -rf ssl-util && git clone https://github.com/TroyConrad/ssl-util.git && cd ssl-util && sudo ./install.sh
 
 For a fresh install, edit the /etc/ssl-util/settings.yml file and add the following:
 
